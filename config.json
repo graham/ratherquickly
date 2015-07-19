@@ -1,1 +1,1 @@
-{"project_name": "testing"}
+{"is_root": true, "project_name": "testing", "cors":"*"}
