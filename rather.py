@@ -5,11 +5,12 @@ import sys
 import os
 import json
 import urllib
+import zipfile
+import stat
 
 # libs needed to work.
 import boto3
 
-import zipfile,os.path
 def unzip(source_filename, dest_dir):
     with zipfile.ZipFile(source_filename) as zf:
         for member in zf.infolist():
@@ -24,6 +25,19 @@ def unzip(source_filename, dest_dir):
                 path = os.path.join(path, word)
             zf.extract(member, path)
 
+def zipdir(path, ziph):
+    curdir = os.path.abspath(os.curdir)
+    os.chdir(path)
+    for root, dirs, files in os.walk('.'):
+        for file in files:
+            filepath = os.path.join(root, file)
+            if file == 'config.json' or file.startswith('.'):
+                pass
+            else:
+                info = zipfile.ZipInfo(file)
+                ziph.write(filename=filepath)
+    os.chdir(curdir)
+    
 def load_config():
     return json.loads(open('config.json').read())
 
@@ -34,7 +48,6 @@ def load_config_path(path):
     
     while (not last_config.get('is_root', False)) and (not (path in ('/', ''))):
         filename = "%s/config.json" % path
-        print filename
         if os.path.exists(filename):
             last_config = json.loads(open(filename).read())
             hits.append(last_config)
@@ -42,7 +55,6 @@ def load_config_path(path):
         
     final_config = {}
     for i in reversed(hits):
-        print i
         final_config.update(i)
     return final_config
 
@@ -53,8 +65,8 @@ def save_config(config):
 
 def ensure_dirs(path, sep='.'):
     fpath = path.split(sep)
+    full_path = []
     
-    full_path = ['functions']
     for node in fpath:
         dir_path = '/'.join(full_path + [node])
         if not os.path.isdir(dir_path):
@@ -76,97 +88,118 @@ def main():
     else:
         print 'Command: %s not found.' % command
 
-def command_pull(options):
-    if options == []:
-        print 'No args, try lambda'
-        return
-
-    for module in options:
-        if module == 'lambda':
-            lam = boto3.client('lambda')
-            funcs = lam.list_functions().get("Functions")
-            for i in funcs:
-                function_name = i.get("FunctionName")
-                module_path = ensure_dirs(function_name, '_')
-
-                print 'creating config file for %s' % '/'.join(module_path)
-                config_file = open('/'.join(module_path + ['config.json']), 'w')
-                config_file.write(json.dumps(i))
-                config_file.close()
-
-                code = lam.get_function(FunctionName=i.get("FunctionName"))
-                code_url = code.get('Code').get('Location')
-                
-                print 'Downloading code for %s...' % i.get("FunctionName"),
-                sys.stdout.flush()
-                urllib.urlretrieve(code_url, filename='/'.join(module_path + ['code.zip']))
-                print ''
-
-                ziplocation = '/'.join(module_path + ['code.zip'])
-                print 'unzipping...'
-                unzip(ziplocation, '/'.join(module_path))
-                os.remove(ziplocation)
-
+## lambda functions
 def command_push(options):
-    module = options[0]
+    path = options[0]
+    create_if_missing=True
+    check_and_set_permissions=False
+    
+    lam = boto3.client('lambda')
+    function_name = path.replace('.', '_')
+    function_path = path.replace('.', '/')
+    
+    try:
+        thefunc = lam.get_function(FunctionName=function_name)
+    except:
+        #function does not exist.
+        thefunc = None
 
-    for function in options[1:]:
-        print function
-                
-def command_init(options):
-    # First lets see if we already have config.json
-    if os.path.exists('config.json'):
-        print 'You already have a `config.json` in this directory.'
+    ensure_dirs('build', '.')
+    filename = 'build/%s.zip' % function_name
+    print 'zipping %s into %s' % (function_path, filename)
+    zipdir(function_path, zipfile.ZipFile(filename, 'w', allowZip64=True))
+    
+    lam = boto3.client('lambda')
+    push = {
+        'FunctionName':function_name,
+        'Code':{'ZipFile':open(filename).read()}
+    }
+
+    if thefunc == None and create_if_missing:
+        print 'creating %s' % function_name
+        local_config = load_config_path(function_path + "/config.json")
+        push['Runtime'] = local_config['Runtime']
+        push['Role'] = local_config['Role']
+        push['Handler'] = local_config['Handler']
+        # Lets ask AWS Lambda to create the function (with no API endpoints).
+        lam.create_function(**push)
     else:
-        project_name = raw_input('Project Name: ')
-        print 'creating config.json...'
-        f = open('config.json', 'w')
-        f.write(json.dumps({'project_name':project_name, 'is_root':True}))
-        f.close()
-        print 'done.'
+        print 'updating code for %s' % function_name
+        push['ZipFile'] = push['Code']['ZipFile']
+        del push['Code']
+        lam.update_function_code(**push)
+
+def command_init(options):
+    path = options[0]
+    master_config = load_config()
+    function_name = path.replace('.', '_')
+    
+    config = {
+        'Runtime':'nodejs',
+        'Role':master_config.get('LambdaRole', 'lambda_basic_execution'),
+        'Handler':'index.handler',
+        'Description':'A lambda function, created Rather Quickly.'
+    }
+
+    simple_script = '''#! /usr/bin/env node\nconsole.log('Loading function');\n\nexports.handler = function(event, context) {\n    context.succeed("Push Works!");\n};\n'''
+
+    ## lets create the local files
+    print 'creating files.'
+    
+    dir_path = path.replace('.', '/')
+    ensure_dirs(path)
+
+    print '\t%s/config.json' % dir_path
+    f = open(dir_path + '/config.json', 'w')
+    f.write(json.dumps(config))
+    f.close()
+
+    print '\t%s/index.js' % dir_path
+    f = open(dir_path + '/index.js', 'w')
+    f.write(simple_script)
+    f.close()
+
+    print '\tadding execute permissions to index.js'
+    st = os.stat(dir_path + '/index.js')
+    os.chmod(dir_path + '/index.js', st.st_mode | stat.S_IEXEC)
+
+    print 'done.'
+    
+def command_pull(options):
+    lam = boto3.client('lambda')
+    funcs = lam.list_functions().get("Functions")
+
+    start = ''
+    if len(options) > 0:
+        start = options[0]
         
-def command_create(options):
-    if options == []:
-        print 'Usage: rather.py create <module_type>'
-        print '\tlambda: a lambda route behind a API Gateway resource.'
-        return
+    ensure_dirs('functions')
 
-    config = load_config()
+    for i in funcs:
+        function_name = i.get("FunctionName")
+        module_path = ensure_dirs('%s' % function_name, '_')
 
-    for module in options:
-        if module == 'lambda':
-            if not os.path.isdir('functions'):
-                print 'directory `functions` being created to store lambdas.'
-                os.mkdir('functions')
+        print 'creating config file for %s' % '/'.join(module_path)
+        config_file = open('/'.join(module_path + ['config.json']), 'w')
+        config_file.write(json.dumps(i))
+        config_file.close()
 
-            print "Please provide a name for your function (can be changed later)"
-            path = raw_input("Enter path (sep .): ")
+        code = lam.get_function(FunctionName=i.get("FunctionName"))
+        code_url = code.get('Code').get('Location')
 
-            full_path = ensure_dirs(path, '.')
-            
-            source_file_name = 'handler.js'
+        print 'Downloading code for %s...' % i.get("FunctionName"),
+        sys.stdout.flush()
+        urllib.urlretrieve(code_url, filename='/'.join(module_path + ['code.zip']))
+        print ''
 
-            config_path = '/'.join(full_path + ['config.json'])
-            source_path = '/'.join(full_path + [source_file_name])
+        ziplocation = '/'.join(module_path + ['code.zip'])
+        print 'unzipping...'
+        unzip(ziplocation, '/'.join(module_path))
+        #os.remove(ziplocation)
+        
 
-            source_file = open(source_path, 'w')
-            source_file.write('''console.log('Loading function');
-exports.handler = function(event, context) {
-    context.succeed('hello world.');
-};''')
-            source_file.close()
-
-            config_file = open(config_path, 'w')
-            config = {}
-            config['type'] = 'lambda'
-            config['lambda_function_name'] = '.'.join(full_path)
-            config['source_file'] = source_file_name
-            config['runtime'] = 'NodeJS'
-            config['handler'] = 'index.handler'
-            config_file.write(json.dumps(config))
-            config_file.close()
-        else:
-            print "I don't know how to create modules of type %s" % module
+def command_checkup(options):
+    print 'sprinkling faiery dust...'
 
 if __name__ == '__main__':
     main()
