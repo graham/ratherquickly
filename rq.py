@@ -78,5 +78,17 @@ def command_slist(args):
     for i in stages.get('item'):
         print i.get('stageName').rjust(10), ' -> ', i.get('deploymentId')
 
+def command_apilist(args):
+    gateway = boto3.client('apigateway')
+    config = load_config_path('.')
+
+    apis = gateway.get_rest_apis()
+    for i in apis.get('items'):
+        name = i.get('name')
+        id = i.get('id')
+        desc = i.get('description')
+
+        print name.rjust(20), '-', id, '-', desc
+
 if __name__ == '__main__':
     main()
