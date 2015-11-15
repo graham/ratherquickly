@@ -22,6 +22,15 @@ from ratherquickly.rather_util import *
 def main():
     if len(sys.argv) <= 1:
         print 'Usage: rather.py <command> <options>'
+        print ''
+
+        s = 'command_'
+
+        for i in globals():
+            if i.startswith(s):
+                print '\t', i[len(s):].rjust(20), '|', 'Description'
+
+        print ''
         return
 
     command = sys.argv[1]
