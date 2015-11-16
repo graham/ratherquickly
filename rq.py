@@ -60,6 +60,19 @@ def command_rlist(args):
     for i in resources.get('items',[]):
         print i
 
+def command_rpull(args):
+    gateway = boto3.client('apigateway')
+    config = load_config_path('.')
+    api_id = config.get('target_api', None)
+
+    resources = gateway.get_resources(restApiId=api_id)
+    for i in resources.get('items',[]):
+        path = i.get('path')
+        uid = i.get('id')
+        pprint.pprint(gateway.get_method(restApiId=api_id,
+                                         resourceId=uid,
+                                         httpMethod='GET'))
+
 def command_dlist(args):
     gateway = boto3.client('apigateway')
     config = load_config_path('.')
